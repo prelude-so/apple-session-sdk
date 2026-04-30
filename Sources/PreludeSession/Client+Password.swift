@@ -1,0 +1,167 @@
+import Foundation
+
+// MARK: - Public facade
+
+public extension PreludeSessionClient {
+    /// Log in with an email identifier and a password.
+    ///
+    /// `POST /login/email/password` returns a short-lived
+    /// `challenge_token`; the SDK exchanges it on
+    /// `/login/finalize`. Races with ``logout()`` are closed by
+    /// the session-epoch guard.
+    @discardableResult
+    func loginWithPassword(
+        _ options: LoginWithPasswordOptions
+    ) async throws -> PreludeUser {
+        try await impl.loginWithPassword(options)
+    }
+
+    /// Fetch the server's password compliancy rules.
+    /// Unauthenticated — the rules are public configuration.
+    func passwordCompliancy() async throws -> PreludePasswordCompliancy {
+        try await impl.passwordCompliancy()
+    }
+
+    /// Validate a candidate password against the server's
+    /// configured compliancy rules. One network call, then pure
+    /// local classification.
+    ///
+    /// Character classification uses Unicode `generalCategory`
+    /// (`Lu`/`Ll`/`Nd`) and counts code points — important when
+    /// passwords contain emoji or combining sequences where
+    /// grapheme-cluster counts would disagree.
+    func validatePassword(
+        _ password: String
+    ) async throws -> PreludePasswordCompliancyResults {
+        try await impl.validatePassword(password)
+    }
+}
+
+// MARK: - Implementation
+
+extension PreludeSessionClient._Impl {
+    func loginWithPassword(
+        _ options: LoginWithPasswordOptions
+    ) async throws -> PreludeUser {
+        let dispatchId = try await dispatchSignalsIfConfigured()
+
+        var request = buildRequest(path: "login/email/password")
+        request.httpBody = try JSONEncoder().encode(
+            LoginWithPasswordRequestBody(
+                emailAddress: options.emailAddress,
+                password: options.password.value,
+                dispatchID: dispatchId
+            )
+        )
+
+        let (body, _) = try await httpClient.sendJSON(
+            request,
+            interceptors: [],
+            as: ChallengeTokenResponse.self
+        )
+
+        guard let challengeToken = body.challengeToken,
+              !challengeToken.isEmpty else {
+            throw PreludeSessionError.missingChallengeToken(
+                "Missing challenge token from password login response"
+            )
+        }
+
+        return try await finalizeLogin(challengeToken: challengeToken)
+    }
+
+    func passwordCompliancy() async throws -> PreludePasswordCompliancy {
+        let request = buildRequest(path: "password/compliancy", method: "GET")
+
+        let (body, _) = try await httpClient.sendJSON(
+            request,
+            interceptors: [],
+            as: PreludePasswordCompliancy.self
+        )
+        return body
+    }
+
+    func validatePassword(
+        _ password: String
+    ) async throws -> PreludePasswordCompliancyResults {
+        let compliancy = try await passwordCompliancy()
+        return PreludeSessionClient.validate(password: password, against: compliancy)
+    }
+}
+
+// MARK: - Pure classification
+
+extension PreludeSessionClient {
+    /// Classify a candidate password against `compliancy`. Exposed
+    /// so tests exercise the rule logic without standing up a
+    /// network stack.
+    static func validate(
+        password: String,
+        against compliancy: PreludePasswordCompliancy
+    ) -> PreludePasswordCompliancyResults {
+        var uppercase = 0
+        var lowercase = 0
+        var numbers = 0
+        var symbols = 0
+
+        for scalar in password.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .uppercaseLetter:
+                uppercase += 1
+            case .lowercaseLetter:
+                lowercase += 1
+            case .decimalNumber:
+                numbers += 1
+            default:
+                symbols += 1
+            }
+        }
+
+        let length = password.unicodeScalars.count
+
+        let results: [PreludePasswordCompliancyResult] = [
+            .init(
+                criterion: .minLength,
+                actual: length,
+                expected: compliancy.minLength,
+                valid: length >= compliancy.minLength
+            ),
+            .init(
+                criterion: .maxLength,
+                actual: length,
+                expected: compliancy.maxLength,
+                // maxLength == 0 is the "no upper bound" sentinel.
+                valid: compliancy.maxLength == 0 || length <= compliancy.maxLength
+            ),
+            .init(
+                criterion: .uppercase,
+                actual: uppercase,
+                expected: compliancy.uppercase,
+                valid: uppercase >= compliancy.uppercase
+            ),
+            .init(
+                criterion: .lowercase,
+                actual: lowercase,
+                expected: compliancy.lowercase,
+                valid: lowercase >= compliancy.lowercase
+            ),
+            .init(
+                criterion: .numbers,
+                actual: numbers,
+                expected: compliancy.numbers,
+                valid: numbers >= compliancy.numbers
+            ),
+            .init(
+                criterion: .symbols,
+                actual: symbols,
+                expected: compliancy.symbols,
+                valid: symbols >= compliancy.symbols
+            ),
+        ]
+
+        return PreludePasswordCompliancyResults(
+            valid: results.allSatisfy(\.valid),
+            results: results
+        )
+    }
+}
