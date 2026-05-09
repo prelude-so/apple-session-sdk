@@ -245,12 +245,23 @@ final class StubHTTPSession: HTTPSession, @unchecked Sendable {
 
     private let lock = NSLock()
     private var byPath: [String: CannedResponse] = [:]
+    // Per-path FIFO of canned responses; consumed before `byPath`.
+    // Used by tests that need different responses across hops on
+    // the same path (e.g. proactive-refresh: 401 → 200).
+    private var sequences: [String: [CannedResponse]] = [:]
     private var recordedRequests: [URLRequest] = []
     private var gatedPaths: Set<String> = []
     private var pendingGates: [String: [CheckedContinuation<Void, Never>]] = [:]
 
     func install(path: String, response: CannedResponse) {
         lock.withLock { byPath[path] = response }
+    }
+
+    /// Queue a FIFO of canned responses for `path`. Each request
+    /// pops the head; once empty, the stub falls back to whatever
+    /// `install(path:response:)` last set for that path.
+    func installSequence(path: String, responses: [CannedResponse]) {
+        lock.withLock { sequences[path] = responses }
     }
 
     func installGate(path: String) {
@@ -278,6 +289,13 @@ final class StubHTTPSession: HTTPSession, @unchecked Sendable {
 
         let (shouldWait, canned): (Bool, CannedResponse?) = lock.withLock {
             recordedRequests.append(request)
+            // Sequence head wins over the single-shot map so tests
+            // can override one hop without disturbing the rest.
+            if var queue = sequences[path], !queue.isEmpty {
+                let head = queue.removeFirst()
+                sequences[path] = queue
+                return (gatedPaths.contains(path), head)
+            }
             return (gatedPaths.contains(path), byPath[path])
         }
 

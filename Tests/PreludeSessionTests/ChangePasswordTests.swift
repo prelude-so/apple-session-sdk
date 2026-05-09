@@ -130,11 +130,11 @@ final class ChangePasswordTests: XCTestCase {
 
     // MARK: - DPoP attachment policy
 
-    /// `/me/password/reset` is bearer-authenticated — the server
-    /// runs only the `Authorization` middleware on it, and the JS
-    /// Web SDK reference attaches no DPoP. Sending a proof would
-    /// be ignored at best and rejected by strict proxies at worst.
-    /// Pin the absence so a future refactor can't reintroduce it.
+    /// `/me/password/reset` is bearer-authenticated — only
+    /// the `Authorization` middleware runs on it. Sending a
+    /// DPoP proof would be ignored at best and rejected by
+    /// strict proxies at worst. Pin the absence so a future
+    /// refactor can't reintroduce it.
     func test_changePassword_doesNotAttachDPoPHeader() async throws {
         let fixture = try Fixture.make(domain: domain, baseURL: baseURL, clock: clock)
         try await fixture.prePopulate()

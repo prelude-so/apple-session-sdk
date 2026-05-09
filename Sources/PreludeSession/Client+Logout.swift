@@ -29,11 +29,6 @@ extension PreludeSessionClient._Impl {
             return try await existing.value
         }
 
-        // Bump the epoch after the dedup check so coalesced callers
-        // don't bump redundantly. A refresh started under the old
-        // value will see the mismatch and bail.
-        sessionEpoch += 1
-
         let task = Task<Void, Error> { try await self.doLogout() }
         inflightLogout = task
         defer { inflightLogout = nil }
@@ -62,6 +57,16 @@ extension PreludeSessionClient._Impl {
             wipeError = error
         }
 
+        // Order is **snapshot → wipe → bump → /revoke**. Bumping
+        // AFTER the wipe is load-bearing for the resurrection
+        // guard: any refresh whose snapshot read pre-wipe tokens
+        // captured the pre-bump epoch, so its post-network check
+        // sees the mismatch and bails before persisting rotated
+        // tokens back into stores we just emptied. A refresh that
+        // starts after the wipe reads an empty store and is
+        // rejected by the server.
+        sessionEpoch += 1
+
         // No credentials on file — nothing to revoke.
         guard let dpopHandle, let refreshToken, !refreshToken.isEmpty else {
             if let wipeError { throw wipeError }
@@ -78,14 +83,31 @@ extension PreludeSessionClient._Impl {
         guard let htu = DPoPInterceptor.htuURL(for: request) else {
             throw PreludeSessionError.invalidConfiguration("URLRequest is missing a URL")
         }
-        let proof = try DefaultDPoPProofBuilder().create(
-            key: dpopHandle,
-            method: request.httpMethod ?? "POST",
-            url: htu,
-            nonce: dpopNonce,
-            jti: nil,
-            now: Date()
-        )
+
+        // Sign /revoke from the snapshot. A signing failure here
+        // (e.g. `errSecAuthFailed` because the Secure Enclave key
+        // was invalidated by a biometric reset) silently degrades:
+        // the local wipe already landed, so the user is logged
+        // out from the device's point of view. Forcing the caller
+        // to handle a thrown signing error in addition to a clean
+        // logout return would be worse than skipping the server-
+        // side revocation, which TTLs out on its own. Network /
+        // HTTP errors during the send below continue to surface
+        // so callers can retry.
+        let proof: String
+        do {
+            proof = try DefaultDPoPProofBuilder().create(
+                key: dpopHandle,
+                method: request.httpMethod ?? "POST",
+                url: htu,
+                nonce: dpopNonce,
+                jti: nil,
+                now: Date()
+            )
+        } catch {
+            if let wipeError { throw wipeError }
+            return
+        }
         request.setValue(proof, forHTTPHeaderField: HTTPHeader.dpop)
 
         // If /revoke also throws, surface the wipe error in
@@ -120,11 +142,25 @@ extension PreludeSessionClient._Impl {
         attempt { try keyStore.delete(domain: domain) }
         attempt { try keyStore.deleteNonce(domain: domain) }
         attempt { try refreshTokenStore.delete(domain: domain) }
+
+        // Server-set cookies (e.g. `did`,
+        // `__Host-verification-login_<id>`) live in
+        // `HTTPCookieStorage.shared` and survive across launches.
+        // Wipe everything scoped to our host so a logout doesn't
+        // leave bearer-adjacent material behind.
+        for cookie in HTTPCookieStorage.shared.cookies(for: baseURL) ?? [] {
+            HTTPCookieStorage.shared.deleteCookie(cookie)
+        }
+
         do {
             try await accessTokenCache.clear(domain: domain)
         } catch {
             if firstError == nil { firstError = error }
         }
+        // In-memory step-up handle. Logically part of the wipe — a
+        // stale challenge that survives logout would let an
+        // observer believe a flow is still in progress.
+        activeStepUp = nil
 
         if let firstError { throw firstError }
     }

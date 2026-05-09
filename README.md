@@ -38,14 +38,20 @@ let user = try await client.loginWithPassword(
 
 #### Password validation
 
-Fetch the password policy configured on your project and validate a candidate password locally before submitting it:
+Validate a candidate password against the project's policy in one call:
 
 ```
-let policy = try await client.passwordCompliancy()
-let result = try await client.validatePassword("candidate", against: policy)
+let result = try await client.validatePassword("candidate")
 if result.valid {
     // ok to submit
 }
+```
+
+Or fetch the policy once and classify locally — useful for live-as-you-type validation:
+
+```
+let policy = try await client.passwordCompliancy()
+let result = PreludeSessionClient.validate(password: "candidate", against: policy)
 ```
 
 #### Session lifecycle
@@ -59,6 +65,57 @@ let token   = await client.accessToken  // the access token, if any
 ```
 
 Protected requests auto-refresh expired access tokens transparently, so most apps will not need to call `refresh()` explicitly.
+
+#### Step-up authentication
+
+Some operations (e.g. changing the password) require a fresh proof of identity. Request the scope, deliver the OTP, then submit the code:
+
+```
+let challenge = try await client.requestStepUp(scope: "prld:pwd:write")
+try await client.sendStepUpOTP(challenge)            // POST /otp
+let next = try await client.submitStepUpOTP(challenge, code: "123456")
+
+// `next == nil` means the flow completed and the session now
+// carries the requested scope. A non-nil value is the next
+// challenge in a multi-step flow — call `sendStepUpOTP` on it
+// to deliver the next code.
+```
+
+`client.activeStepUp` exposes the most recent in-flight challenge so a UI can resume from a cold start.
+
+#### Change password
+
+After completing a step-up for `prld:pwd:write`:
+
+```
+try await client.changePassword(RedactedString("new-password"))
+```
+
+The SDK drops the granted scope locally on success so the same token cannot reset the password again.
+
+#### Manage active sessions
+
+List the user's sessions across devices and revoke them individually or in bulk:
+
+```
+let page = try await client.listSessions(ListSessionsOptions(limit: 20))
+
+try await client.revokeSessions(.others)            // keep this device, sign out the rest
+try await client.revokeSessions(.session(id: id))   // revoke a specific session
+try await client.revokeSessions(.all)               // including this device
+```
+
+Revoking the current session (`.all`, `.mine`, or its specific id) also wipes the local credentials, mirroring `logout()`.
+
+#### Migrate a legacy session
+
+Exchange an existing bearer token from a previous authentication system for a Prelude session:
+
+```
+let user = try await client.migrate(MigrateOptions(token: "legacy-bearer"))
+```
+
+Idempotent: a valid cached session short-circuits the network call, so it is safe to call on every launch.
 
 #### Endpoint configuration
 

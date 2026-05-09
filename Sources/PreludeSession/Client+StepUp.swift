@@ -5,25 +5,52 @@ import Foundation
 public extension PreludeSessionClient {
     /// Request a step-up to `scope`.
     ///
-    /// Posts to `/stepup/request`. When the server issues an OTP
-    /// challenge (the common case for `prld:pwd:write`) this also
-    /// fires `POST /otp` inline so the caller's next action is
-    /// "enter the code".
+    /// Posts to `/stepup/request`. Returns a ``StepUpChallenge``
+    /// handle — pass it to ``sendStepUpOTP(_:)`` to trigger code
+    /// delivery, then to ``submitStepUpOTP(_:code:)`` to verify.
     ///
-    /// The returned ``StepUpChallenge`` is the only handle to this
-    /// attempt — pass it back to ``submitStepUpOTP(_:code:)``.
+    /// OTP delivery is caller-driven on purpose: it avoids
+    /// unsolicited deliveries on `review` flows and lets UIs
+    /// defer firing `/otp` until the user lands on the
+    /// code-entry screen (or taps "resend code").
+    ///
     /// Multiple in-flight step-ups on one client are supported;
     /// each caller holds its own value.
+    ///
+    /// `metadata` is forwarded verbatim to the server's step-up
+    /// audit hook. Server-side caps apply (max 5 keys, 12-char
+    /// keys, 32-char values); a violation surfaces as
+    /// ``PreludeSessionError/badRequest(_:)``.
     @discardableResult
-    func requestStepUp(scope: String) async throws -> StepUpChallenge {
-        try await impl.requestStepUp(scope: scope)
+    func requestStepUp(
+        scope: String,
+        metadata: [String: String]? = nil
+    ) async throws -> StepUpChallenge {
+        try await impl.requestStepUp(scope: scope, metadata: metadata)
+    }
+
+    /// Trigger OTP delivery (`POST /otp`) for an in-flight
+    /// step-up `challenge`.
+    ///
+    /// Call this when `challenge.currentStep` is an OTP-delivery
+    /// step (`verify_email` / `verify_sms`) so the user receives
+    /// the code. Caller-driven so the UI decides when delivery
+    /// fires.
+    ///
+    /// Throws ``PreludeSessionError/invalidChallengeToken(_:)``
+    /// if `challenge` is blocked (carries no token).
+    func sendStepUpOTP(_ challenge: StepUpChallenge) async throws {
+        try await impl.sendStepUpOTP(challenge)
     }
 
     /// Submit an OTP code for `challenge`.
     ///
     /// Returns the next ``StepUpChallenge`` for multi-step flows,
     /// or `nil` when the flow has completed and the session has
-    /// been refreshed with the granted scope.
+    /// been refreshed with the granted scope. For a multi-step
+    /// flow whose next step is also OTP delivery, the caller must
+    /// invoke ``sendStepUpOTP(_:)`` on the returned handle to
+    /// trigger the next code.
     ///
     /// On a `bad_check_code` rejection the original `challenge`
     /// stays usable up to the server's bucket limit. On any other
@@ -42,12 +69,19 @@ public extension PreludeSessionClient {
 
 extension PreludeSessionClient._Impl {
     @discardableResult
-    func requestStepUp(scope: String) async throws -> StepUpChallenge {
+    func requestStepUp(
+        scope: String,
+        metadata: [String: String]?
+    ) async throws -> StepUpChallenge {
         let dispatchID = try await dispatchSignalsIfConfigured()
 
         var request = buildRequest(path: "stepup/request")
         request.httpBody = try JSONEncoder().encode(
-            StepUpRequestBody(scope: scope, dispatchID: dispatchID)
+            StepUpRequestBody(
+                scope: scope,
+                metadata: metadata,
+                dispatchID: dispatchID
+            )
         )
 
         let (body, http) = try await httpClient.sendJSON(
@@ -57,7 +91,9 @@ extension PreludeSessionClient._Impl {
         )
 
         if body.status == .blocked {
-            return StepUpChallenge.blocked(requestedScope: scope)
+            let blocked = StepUpChallenge.blocked(requestedScope: scope)
+            activeStepUp = blocked
+            return blocked
         }
 
         guard let challengeToken = body.challengeToken, !challengeToken.isEmpty else {
@@ -73,8 +109,33 @@ extension PreludeSessionClient._Impl {
             timeDiffSec: http.timeDiffSec
         )
 
-        try await deliverOTPIfNeeded(for: challenge)
+        // Defensive: `/stepup/request` is contracted to emit
+        // flows that need at least one verification step. A
+        // response that arrives already at `completed` is a
+        // server contract violation; throw before any
+        // post-completion refresh could fire and consume the
+        // refresh-token rotation.
+        if challenge.currentStep == PreludeSessionClient.completedStepName {
+            throw PreludeSessionError.invalidChallengeToken(
+                "stepup/request returned an already-completed challenge"
+            )
+        }
+
+        activeStepUp = challenge
         return challenge
+    }
+
+    func sendStepUpOTP(_ challenge: StepUpChallenge) async throws {
+        guard !challenge.token.isEmpty else {
+            // Blocked challenges carry no token. Catching here
+            // means the SDK never fires `/otp` with an empty
+            // token — the server would 400, which would leak as a
+            // generic BadRequest and obscure the real cause.
+            throw PreludeSessionError.invalidChallengeToken(
+                "Cannot send OTP for a blocked step-up challenge"
+            )
+        }
+        try await sendStepUpOTPInternal(challengeToken: challenge.token)
     }
 
     @discardableResult
@@ -133,41 +194,32 @@ extension PreludeSessionClient._Impl {
             timeDiffSec: http.timeDiffSec
         )
 
-        if next.currentStep == "completed" {
+        if next.currentStep == PreludeSessionClient.completedStepName {
             // The post-completion refresh consumes `advanced` and
             // mints an access token carrying the granted scope.
             _ = try await refreshAfterStepUp(challengeToken: advanced)
+            activeStepUp = nil
             return nil
         }
 
-        try await deliverOTPIfNeeded(for: next)
+        activeStepUp = next
         return next
     }
 
     /// Refresh with `step_up_token` so the next access token
-    /// carries the granted scope. Drains any in-flight plain
-    /// refresh first — that path mints an unscoped token, so
-    /// step-up can't piggy-back on its dedup slot.
+    /// carries the granted scope. Invalidate first (the only
+    /// `await` here), then drain — keeps ``startRefresh``'s
+    /// "slot empty, no await since" invariant intact.
     func refreshAfterStepUp(challengeToken: String) async throws -> PreludeUser {
-        await drainInflightRefresh()
         try await accessTokenCache.invalidate(domain: domain)
+        await drainInflightRefresh()
         return try await startRefresh(stepUpToken: challengeToken).value
-    }
-
-    /// Auto-fire `POST /otp` when the next challenge step is an
-    /// OTP delivery so the caller's next action is just "enter
-    /// the code". Symmetric across ``requestStepUp(scope:)`` and
-    /// ``submitStepUpOTP(_:code:)`` so multi-step OTP chains keep
-    /// firing each step's delivery.
-    private func deliverOTPIfNeeded(for challenge: StepUpChallenge) async throws {
-        guard PreludeSessionClient.isOTPStep(challenge.currentStep) else { return }
-        try await sendStepUpOTP(challengeToken: challenge.token)
     }
 
     /// Trigger OTP delivery for an in-flight challenge.
     /// Unauthenticated: the challenge token in the body identifies
     /// the caller; no DPoP.
-    private func sendStepUpOTP(challengeToken: String) async throws {
+    private func sendStepUpOTPInternal(challengeToken: String) async throws {
         let dispatchID = try await dispatchSignalsIfConfigured()
 
         var request = buildRequest(path: "otp")
@@ -185,12 +237,10 @@ extension PreludeSessionClient._Impl {
 // MARK: - Step-name helpers
 
 extension PreludeSessionClient {
-    static let otpStepNames: Set<String> = ["verify_email", "verify_sms"]
-
-    static func isOTPStep(_ currentStep: String?) -> Bool {
-        guard let currentStep else { return false }
-        return otpStepNames.contains(currentStep)
-    }
+    /// Final step name returned by the server when the step-up
+    /// flow is finished and the next call should `/refresh` for
+    /// the scoped access token.
+    static let completedStepName = "completed"
 }
 
 // MARK: - Challenge-token decoding

@@ -96,6 +96,17 @@ public struct PreludeUser: Sendable, Equatable {
     }
 }
 
+/// Options for ``PreludeSessionClient/migrate(_:)``: a single
+/// legacy bearer token to exchange for a Prelude session.
+public struct MigrateOptions: Sendable {
+    /// Bearer token issued by the legacy authentication system.
+    public var token: String
+
+    public init(token: String) {
+        self.token = token
+    }
+}
+
 /// Options for starting an OTP login.
 public struct StartOTPLoginOptions: Codable, Sendable {
     public var identifier: PreludeIdentifier
@@ -147,9 +158,28 @@ struct ChallengeTokenResponse: Decodable {
 
 struct FinalizeLoginRequestBody: Encodable {
     var challengeToken: String
+    /// PKCE verifier paired with the `code_challenge` sent at the
+    /// start of the flow (e.g. ``MigrateRequestBody``). Omitted when
+    /// the originating exchange didn't bind a verifier.
+    var codeVerifier: String?
 
     enum CodingKeys: String, CodingKey {
         case challengeToken = "challenge_token"
+        case codeVerifier = "code_verifier"
+    }
+}
+
+/// `POST /migration` request body. PKCE-bound: pair `codeChallenge`
+/// here with the verifier sent later on `/login/finalize`.
+struct MigrateRequestBody: Encodable {
+    var token: String
+    var codeChallenge: String
+    var dispatchID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case token
+        case codeChallenge = "code_challenge"
+        case dispatchID = "dispatch_id"
     }
 }
 
@@ -394,10 +424,15 @@ public struct StepUpChallenge: Sendable, Equatable {
 
 struct StepUpRequestBody: Encodable {
     var scope: String
+    /// Free-form key/value pairs the server forwards to the
+    /// configured step-up audit hook. Server caps: max 5 keys,
+    /// 12-char keys, 32-char values.
+    var metadata: [String: String]?
     var dispatchID: String?
 
     enum CodingKeys: String, CodingKey {
         case scope
+        case metadata
         case dispatchID = "dispatch_id"
     }
 }
@@ -448,4 +483,189 @@ struct StepUpRefreshRequestBody: Encodable {
 
 struct ChangePasswordRequestBody: Encodable {
     var password: String
+}
+
+// MARK: - Manage sessions (list / revoke)
+
+/// Form factor reported by the server for an active session.
+public enum PreludeDeviceType: String, Sendable, Equatable, Decodable {
+    case desktop
+    case mobile
+    case tablet
+    case unknown
+
+    /// Tolerate any future server-side additions by mapping
+    /// unknown values to ``unknown`` rather than failing decode.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = PreludeDeviceType(rawValue: raw) ?? .unknown
+    }
+}
+
+/// One active session as reported by `GET /me/list`. Timestamps
+/// are kept as the server's ISO-8601 strings so callers pick
+/// their own `Date` parsing strategy (locale, fractional seconds,
+/// etc.) without lossy round-tripping.
+public struct PreludeSessionView: Sendable, Equatable, Decodable {
+    public let id: String
+    public let deviceModel: String
+    public let deviceType: PreludeDeviceType
+    public let osVersion: String
+    public let countryCode: String
+    public let createdAt: String
+    public let lastSeenAt: String
+    public let expiresAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case deviceModel = "device_model"
+        case deviceType = "device_type"
+        case osVersion = "os_version"
+        case countryCode = "country_code"
+        case createdAt = "created_at"
+        case lastSeenAt = "last_seen_at"
+        case expiresAt = "expires_at"
+    }
+
+    public init(
+        id: String,
+        deviceModel: String,
+        deviceType: PreludeDeviceType,
+        osVersion: String,
+        countryCode: String,
+        createdAt: String,
+        lastSeenAt: String,
+        expiresAt: String
+    ) {
+        self.id = id
+        self.deviceModel = deviceModel
+        self.deviceType = deviceType
+        self.osVersion = osVersion
+        self.countryCode = countryCode
+        self.createdAt = createdAt
+        self.lastSeenAt = lastSeenAt
+        self.expiresAt = expiresAt
+    }
+}
+
+/// Pagination knobs for ``PreludeSessionClient/listSessions(_:)``.
+/// Both fields are optional; omitted ones fall back to whatever
+/// defaults the server applies.
+public struct ListSessionsOptions: Sendable, Equatable {
+    public var limit: Int?
+    public var offset: Int?
+
+    public init(limit: Int? = nil, offset: Int? = nil) {
+        self.limit = limit
+        self.offset = offset
+    }
+}
+
+/// Paginated `GET /me/list` response.
+public struct ListSessionsResponse: Sendable, Equatable, Decodable {
+    public let sessions: [PreludeSessionView]
+    public let total: Int
+    public let limit: Int
+    public let offset: Int
+
+    public init(
+        sessions: [PreludeSessionView],
+        total: Int,
+        limit: Int,
+        offset: Int
+    ) {
+        self.sessions = sessions
+        self.total = total
+        self.limit = limit
+        self.offset = offset
+    }
+}
+
+/// Which sessions to revoke on `POST /me/revoke`.
+///
+/// Modeled as an enum so `session(id:)` carries its required
+/// identifier in the type rather than relying on a runtime
+/// check.
+public enum RevokeTarget: Sendable, Equatable {
+    /// Every session for this user, including the current one.
+    case all
+    /// Every session except the current one.
+    case others
+    /// Only the session issuing the call — i.e. this client.
+    /// Effectively a ``logout()`` without rotating the server-side
+    /// DPoP-key binding. Other devices stay signed in.
+    case mine
+    /// One specific session, by id.
+    case session(id: String)
+
+    /// Wire value passed to the server's `target` query param.
+    var queryValue: String {
+        switch self {
+        case .all: return "all"
+        case .others: return "others"
+        case .mine: return "mine"
+        case .session: return "session"
+        }
+    }
+}
+
+// MARK: - Plaintext-bearing request bodies: textual reps redact
+
+// `description` / `debugDescription` / `dump()` (via Mirror) all
+// drop the plaintext. The wire payload still encodes verbatim
+// through `Encodable`; redaction targets only stringified surfaces.
+
+extension LoginWithPasswordRequestBody: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String {
+        "LoginWithPasswordRequestBody(emailAddress: \(emailAddress), password: <redacted>, dispatchID: \(dispatchID ?? "nil"))"
+    }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(self, children: [
+            "emailAddress": emailAddress,
+            "password": "<redacted>",
+            "dispatchID": dispatchID as Any,
+        ], displayStyle: .struct)
+    }
+}
+
+extension ChangePasswordRequestBody: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "ChangePasswordRequestBody(password: <redacted>)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(self, children: ["password": "<redacted>"], displayStyle: .struct)
+    }
+}
+
+extension MigrateRequestBody: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String {
+        "MigrateRequestBody(token: <redacted>, codeChallenge: \(codeChallenge), dispatchID: \(dispatchID ?? "nil"))"
+    }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(self, children: [
+            "token": "<redacted>",
+            "codeChallenge": codeChallenge,
+            "dispatchID": dispatchID as Any,
+        ], displayStyle: .struct)
+    }
+}
+
+extension CheckOTPRequestBody: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "CheckOTPRequestBody(code: <redacted>)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(self, children: ["code": "<redacted>"], displayStyle: .struct)
+    }
+}
+
+extension StepUpOTPCheckRequestBody: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "StepUpOTPCheckRequestBody(code: <redacted>, challengeToken: <redacted>)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror {
+        Mirror(self, children: [
+            "code": "<redacted>",
+            "challengeToken": "<redacted>",
+        ], displayStyle: .struct)
+    }
 }

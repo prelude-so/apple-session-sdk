@@ -44,7 +44,12 @@ final class StepUpTests: XCTestCase {
 
     // MARK: - requestStepUp
 
-    func test_requestStepUp_otpStep_returnsChallenge_andAutoKicksOTP() async throws {
+    func test_requestStepUp_otpStep_returnsChallenge_andDoesNotFireOTP() async throws {
+        // `requestStepUp` returns the challenge handle and the
+        // caller decides when to fire `/otp` via
+        // `sendStepUpOTP`. /otp intentionally NOT installed — if
+        // the SDK regressed to auto-firing, the stub would fail
+        // loudly with "no canned response".
         let fixture = try Fixture.make(domain: domain, baseURL: baseURL, clock: clock)
         try await fixture.prePopulate()
 
@@ -55,7 +60,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": otpChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
 
         let challenge = try await fixture.client.requestStepUp(
             scope: "prld:pwd:write"
@@ -67,8 +71,11 @@ final class StepUpTests: XCTestCase {
         XCTAssertEqual(challenge.requestedScope, "prld:pwd:write")
         XCTAssertEqual(challenge.token, otpChallengeToken)
 
-        // Auto-kick: /otp fired in the same call.
-        XCTAssertEqual(fixture.http.requestCount(forPath: "/v1/session/otp"), 1)
+        XCTAssertEqual(
+            fixture.http.requestCount(forPath: "/v1/session/otp"),
+            0,
+            "requestStepUp must not auto-fire /otp; caller drives delivery"
+        )
     }
 
     func test_requestStepUp_blocked_returnsBlockedChallenge_noOTPKicked() async throws {
@@ -139,7 +146,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": otpChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
         fixture.http.install(
             path: "/v1/session/otp/check",
             response: .json(["challenge_token": completedChallengeToken])
@@ -181,7 +187,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": otpChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
         fixture.http.install(
             path: "/v1/session/otp/check",
             response: .json(
@@ -228,7 +233,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": expiredChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
 
         let challenge = try await fixture.client.requestStepUp(scope: "prld:pwd:write")
         XCTAssertEqual(
@@ -251,10 +255,12 @@ final class StepUpTests: XCTestCase {
         )
     }
 
-    /// Multi-step OTP: the second step (`verify_sms`) must also
-    /// auto-fire `POST /otp` — without symmetry the second
-    /// delivery would silently not fire.
-    func test_submitStepUpOTP_advancedOTPStep_autoKicksDelivery() async throws {
+    /// Multi-step OTP: `verify_email` → `verify_sms`. The SDK no
+    /// longer auto-fires `/otp` for the next step — the caller
+    /// drives delivery via ``sendStepUpOTP(_:)``. /otp
+    /// intentionally NOT installed so a regression to auto-firing
+    /// fails loudly.
+    func test_submitStepUpOTP_advancedOTPStep_returnsNextChallenge_withoutAutoFiring() async throws {
         let fixture = try Fixture.make(domain: domain, baseURL: baseURL, clock: clock)
         try await fixture.prePopulate()
 
@@ -272,7 +278,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": otpChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
         fixture.http.install(
             path: "/v1/session/otp/check",
             response: .json(["challenge_token": smsStepToken])
@@ -280,8 +285,8 @@ final class StepUpTests: XCTestCase {
 
         let first = try await fixture.client.requestStepUp(scope: "prld:pwd:write")
         XCTAssertEqual(
-            fixture.http.requestCount(forPath: "/v1/session/otp"), 1,
-            "first OTP delivery should have fired during requestStepUp"
+            fixture.http.requestCount(forPath: "/v1/session/otp"), 0,
+            "requestStepUp must not auto-fire /otp"
         )
 
         let next = try await fixture.client.submitStepUpOTP(first, code: "123456")
@@ -290,8 +295,8 @@ final class StepUpTests: XCTestCase {
         XCTAssertEqual(advanced.token, smsStepToken)
 
         XCTAssertEqual(
-            fixture.http.requestCount(forPath: "/v1/session/otp"), 2,
-            "second OTP delivery should have fired during submitStepUpOTP"
+            fixture.http.requestCount(forPath: "/v1/session/otp"), 0,
+            "submitStepUpOTP must not auto-fire /otp for the next OTP step"
         )
     }
 
@@ -311,7 +316,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": otpChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
         fixture.http.install(path: "/v1/session/revoke", response: .noContent)
         fixture.http.installGate(path: "/v1/session/stepup/request")
 
@@ -344,7 +348,6 @@ final class StepUpTests: XCTestCase {
                 "challenge_token": otpChallengeToken,
             ])
         )
-        fixture.http.install(path: "/v1/session/otp", response: .noContent)
         fixture.http.install(
             path: "/v1/session/otp/check",
             response: .json(["challenge_token": completedChallengeToken])

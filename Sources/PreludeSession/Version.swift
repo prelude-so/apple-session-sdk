@@ -4,18 +4,17 @@ import Foundation
 ///
 /// Format: `Prelude/<sdk-version> (<platform>; <os name> <os version>)`
 ///
-/// Mirrors the JS Web SDK's `Prelude/<version> (Web)` shape, with
-/// platform + OS version added so server-side telemetry can
-/// distinguish iOS / macOS / tvOS deployments without forcing the
-/// host app to surrender its own `User-Agent`.
+/// Platform and OS version are included so server-side telemetry
+/// can distinguish iOS / macOS / tvOS deployments without forcing
+/// the host app to surrender its own `User-Agent`.
 ///
-/// `current` is the source of truth; release tooling rewrites this
-/// constant alongside the package tag.
+/// ``version`` is the source of truth; release tooling rewrites
+/// this constant alongside the package tag.
 enum PreludeSessionSDK {
     /// Semantic version of the PreludeSession package. Bumped at
     /// release time; exposed publicly so apps can include it in
     /// their own diagnostics.
-    public static let version = "0.1.0"
+    public static let version = "0.2.0"
 
     /// `User-Agent` value attached to every outgoing request.
     static let userAgent: String = {
