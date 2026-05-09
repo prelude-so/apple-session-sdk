@@ -91,10 +91,9 @@ extension PreludeSessionClient._Impl {
 
 // MARK: - Pure classification
 
-extension PreludeSessionClient {
-    /// Classify a candidate password against `compliancy`. Exposed
-    /// so tests exercise the rule logic without standing up a
-    /// network stack.
+public extension PreludeSessionClient {
+    /// Classify a candidate password against `compliancy`. Pure
+    /// local logic — no network call.
     static func validate(
         password: String,
         against compliancy: PreludePasswordCompliancy

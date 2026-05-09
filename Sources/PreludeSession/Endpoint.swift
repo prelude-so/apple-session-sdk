@@ -1,9 +1,9 @@
 import Foundation
 
-/// API endpoint for ``PreludeSessionClient``. Shape matches the
-/// sibling Prelude SDK: ``default`` resolves to the canonical
-/// Prelude API address; ``custom(_:)`` accepts an explicit URL
-/// string for staging or local development.
+/// API endpoint for ``PreludeSessionClient``. ``default``
+/// resolves to the canonical Prelude API address;
+/// ``custom(_:)`` accepts an explicit URL string for staging
+/// or local development.
 public enum Endpoint: Sendable {
     case `default`
     case custom(String)

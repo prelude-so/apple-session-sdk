@@ -79,6 +79,14 @@ public struct PreludeSessionClient: Sendable {
         try await impl.invalidateSession()
     }
 
+    /// Most-recently-issued step-up challenge, or `nil` when none
+    /// is in flight. Set on `requestStepUp`, advanced on multi-
+    /// step `submitStepUpOTP`, cleared on completion / logout /
+    /// change-password.
+    public var activeStepUp: StepUpChallenge? {
+        get async { await impl.activeStepUp }
+    }
+
     // MARK: - Static helpers (pure)
 
     /// Adjust a server-reported expiration (Unix seconds) to the
@@ -139,10 +147,21 @@ extension PreludeSessionClient {
         /// `POST /revoke`.
         var inflightLogout: Task<Void, Error>?
 
+        /// Coalesces concurrent ``migrate(_:)`` callers onto a single
+        /// `POST /migration` ⇒ `/login/finalize` round-trip. The
+        /// per-token identity doesn't matter here: once any caller
+        /// establishes a session the cache short-circuits the rest.
+        var inflightMigration: Task<PreludeUser, Error>?
+
         /// Bumped on every ``logout()``. ``refresh()`` captures it
         /// at entry and bails before persisting rotated tokens if
         /// logout moved the counter mid-flight.
         var sessionEpoch: Int = 0
+
+        /// In-memory step-up handle. Tracks the most recent
+        /// challenge so callers can observe in-progress flows
+        /// without holding the value themselves.
+        var activeStepUp: StepUpChallenge?
 
         init(
             baseURL: URL,
@@ -213,8 +232,24 @@ extension PreludeSessionClient {
             try await accessTokenCache.invalidate(domain: domain)
         }
 
-        func buildRequest(path: String, method: String = "POST") -> URLRequest {
-            var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        func buildRequest(
+            path: String,
+            method: String = "POST",
+            queryItems: [URLQueryItem] = []
+        ) -> URLRequest {
+            let url = baseURL.appendingPathComponent(path)
+            // Only round-trip through `URLComponents` when the
+            // caller passed query items: avoids re-encoding a
+            // clean URL on every other call site.
+            let resolvedURL: URL
+            if queryItems.isEmpty {
+                resolvedURL = url
+            } else {
+                var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+                components?.queryItems = queryItems
+                resolvedURL = components?.url ?? url
+            }
+            var request = URLRequest(url: resolvedURL)
             request.httpMethod = method
             request.timeoutInterval = timeout
             // Only advertise Content-Type for methods that carry a

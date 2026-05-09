@@ -29,18 +29,22 @@ extension PreludeSessionClient._Impl {
             ChangePasswordRequestBody(password: newPassword.value)
         )
 
-        // No DPoP on `/me/password/reset`: the server only runs
-        // the bearer-checking `Authorization` middleware on this
-        // route — the access token + `prld:pwd:write` scope is
-        // the entire credential, and the JS Web SDK reference
-        // (`authenticatedMiddleware` only) matches. Sending a
-        // proof would be ignored at best; on strict proxies it's
-        // dead weight that can short-circuit the request before
-        // the server can return its real status.
+        // No DPoP on `/me/password/reset`: the route is
+        // bearer-only — the access token plus the
+        // `prld:pwd:write` scope is the entire credential.
+        // Sending a proof would be ignored at best; on strict
+        // proxies it's dead weight that can short-circuit the
+        // request before the server can return its real status.
         //
         // The auto-refresh path still does the right thing: a
         // 401 here triggers ``_Impl/refresh()``, which signs
         // `/refresh` with the standard ``dpopInterceptor`` itself.
+        // Whichever way the request goes, the step-up that
+        // granted `prld:pwd:write` is no longer in flight. Clear
+        // the handle on every outcome so a stale challenge can't
+        // leak after the reset attempt.
+        defer { activeStepUp = nil }
+
         try await httpClient.sendExpectingNoBody(
             request,
             interceptors: [autoRefreshInterceptor]

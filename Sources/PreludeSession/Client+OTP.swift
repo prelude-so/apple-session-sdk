@@ -73,11 +73,18 @@ extension PreludeSessionClient._Impl {
 
     /// Exchange a challenge token for an access token, persist the
     /// issued refresh token, and return the authenticated user.
-    /// Shared between OTP and password login flows.
+    /// Shared between OTP, password, and migration login flows.
+    ///
+    /// `codeVerifier` carries the PKCE secret paired with a
+    /// `code_challenge` sent earlier (e.g. by ``migrate(_:)``);
+    /// omit when the originating exchange didn't bind a verifier.
     ///
     /// Only ``finalizeLogin`` and ``refresh()`` write to the
     /// refresh-token store.
-    func finalizeLogin(challengeToken: String) async throws -> PreludeUser {
+    func finalizeLogin(
+        challengeToken: String,
+        codeVerifier: String? = nil
+    ) async throws -> PreludeUser {
         // Capture the session epoch. A ``logout()`` that bumps it
         // while we're in flight invalidates whatever we'd persist;
         // bail before writing.
@@ -85,7 +92,10 @@ extension PreludeSessionClient._Impl {
 
         var request = buildRequest(path: "login/finalize")
         request.httpBody = try JSONEncoder().encode(
-            FinalizeLoginRequestBody(challengeToken: challengeToken)
+            FinalizeLoginRequestBody(
+                challengeToken: challengeToken,
+                codeVerifier: codeVerifier
+            )
         )
 
         let (body, http) = try await httpClient.sendJSON(

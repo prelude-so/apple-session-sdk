@@ -13,8 +13,8 @@ import XCTest
 /// `Accept` is `application/json` everywhere.
 ///
 /// TLS pinning + HTTP/2 / keep-alive are not testable in-process
-/// without a real server; see the regression checklist on the
-/// release ticket for the manual integration-test step.
+/// without a real server and are covered by the SDK's manual
+/// transport regression pass.
 final class TransportHeadersTests: XCTestCase {
     private var domain: String!
     private var baseURL: URL!
