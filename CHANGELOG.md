@@ -1,10 +1,31 @@
 # Changelog
 
-Notable changes to `PreludeSession` (the Prelude Apple Session SDK).
+Notable changes to `PreludeAuth` (the Prelude Apple Auth SDK).
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-05-18
+
+### Changed
+- **Renamed module:** `PreludeSession` is now `PreludeAuth`.
+  The Swift module, public client type (`PreludeSessionClient`
+  → `PreludeAuthClient`), error type (`PreludeSessionError` →
+  `PreludeAuthError`), and SwiftPM product all change name.
+  Update `import PreludeSession` to `import PreludeAuth` and
+  the package dependency URL accordingly.
+- **Renamed internal storage namespaces:** Keychain service
+  names and DPoP key tags moved from `so.prelude.session.*` to
+  `so.prelude.auth.*` (access tokens, refresh tokens, DPoP
+  nonces, DPoP keypair tags).
+
+### Fixed
+- Seven backend error codes that previously fell through to
+  `.generic(code:message:)` are now mapped to their typed cases:
+  `use_dpop_nonce` → `.unauthorized`; `invalid_verify_configuration`,
+  `suspended_account`, `invalid_api_key`,
+  `email_verification_not_allowed` → `.forbidden`;
+  `email_domain_not_verified`, `insufficient_balance` →
+  `.badRequest`.
 
 ## [0.2.0] - 2026-05-09
 
@@ -12,8 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `listSessions(_:)` and `revokeSessions(_:)` for managing the user's active sessions, with `RevokeTarget.all`, `.others`, `.mine`, and `.session(id:)`.
 - `sendStepUpOTP(_:)` — caller-driven OTP delivery for step-up flows.
 - `migrate(_:)` — exchange a legacy bearer token for a Prelude session via PKCE-bound `/migration` ⇒ `/login/finalize`.
-- `activeStepUp` accessor on `PreludeSessionClient` so callers can observe an in-flight challenge without holding it themselves.
-- `PreludeSessionClient.validate(password:against:)` static helper for pure local password classification (no network call).
+- `activeStepUp` accessor on `PreludeAuthClient` so callers can observe an in-flight challenge without holding it themselves.
+- `PreludeAuthClient.validate(password:against:)` static helper for pure local password classification (no network call).
 - `requestStepUp(scope:metadata:)` accepts an optional `[String: String]` metadata bag forwarded to the server's step-up audit hook.
 - New typed errors: `expiredChallengeToken`, `tokenReused`, `notFound`, `conflict`.
 - Request bodies carrying secrets (password, OTP code, migration token, step-up code) now redact plaintext from `description` / `debugDescription` / `Mirror`.
@@ -30,7 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - DPoP `htu` now canonicalizes scheme and host to lowercase (RFC 3986), preventing proof mismatch on mixed-case base URLs.
 - `refreshAfterStepUp` invalidates the access-token cache before draining any in-flight refresh, eliminating a narrow window where a concurrent `refresh()` could double-spend the refresh token.
 - `revokeSessions` rejects empty / whitespace-only session ids with a typed configuration error instead of relying on a server 400.
-- Server 5xx errors now surface as `PreludeSessionError.internalServerError` (the backend emits code `internal`; the SDK previously expected `internal_server_error` and fell through to `.generic`).
+- Server 5xx errors now surface as `PreludeAuthError.internalServerError` (the backend emits code `internal`; the SDK previously expected `internal_server_error` and fell through to `.generic`).
 - Decoded session payloads are now immutable.
 
 ## [0.1.0] - 2026-04-29

@@ -3,14 +3,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "PreludeSession",
+    name: "PreludeAuth",
     platforms: [
         .iOS(.v15),
     ],
     products: [
         .library(
-            name: "PreludeSession",
-            targets: ["PreludeSession"]
+            name: "PreludeAuth",
+            targets: ["PreludeAuth"]
         ),
     ],
     dependencies: [
@@ -21,7 +21,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "PreludeSession",
+            name: "PreludeAuth",
             dependencies: [
                 .product(name: "Prelude", package: "apple-sdk"),
             ]
