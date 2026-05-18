@@ -1,7 +1,7 @@
 # Readme
 ### Usage
 
-The Apple Session SDK lets you sign users into your iOS app and manages the resulting session — tokens, refresh, logout — against the Prelude session API.
+The Apple Auth SDK lets you sign users into your iOS app and manages the resulting session — tokens, refresh, logout — against the Prelude Auth API.
 
 It is provided as a regular Swift package that you can [import as a dependency directly into your iOS application](https://developer.apple.com/documentation/xcode/adding-package-dependencies-to-your-app).
 
@@ -10,9 +10,9 @@ It is provided as a regular Swift package that you can [import as a dependency d
 Send a one-time code to the user's email address, then submit the code they entered. The SDK persists the resulting tokens in the Keychain.
 
 ```
-import PreludeSession
+import PreludeAuth
 
-let client = try PreludeSessionClient()
+let client = try PreludeAuthClient()
 
 try await client.startOTPLogin(
     StartOTPLoginOptions(
@@ -51,7 +51,7 @@ Or fetch the policy once and classify locally — useful for live-as-you-type va
 
 ```
 let policy = try await client.passwordCompliancy()
-let result = PreludeSessionClient.validate(password: "candidate", against: policy)
+let result = PreludeAuthClient.validate(password: "candidate", against: policy)
 ```
 
 #### Session lifecycle
@@ -120,7 +120,7 @@ Idempotent: a valid cached session short-circuits the network call, so it is saf
 #### Endpoint configuration
 
 ```
-let client = try PreludeSessionClient(
+let client = try PreludeAuthClient(
     endpoint: .default,                   // or .custom("https://staging.example")
     timeout: 10.0
 )
